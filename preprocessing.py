@@ -18,7 +18,7 @@ target_tokens = set()
 
 # Adjust the number of lines so that
 # preprocessing doesn't take too long for you
-for line in lines[:10000]:
+for line in lines[:2000]:
   # Input and target sentences are separated by tabs
   input_doc, target_doc = line.split('\t')[:2]
   # Appending each input sentence to input_docs
@@ -63,30 +63,37 @@ reverse_input_features_dict = dict(
 reverse_target_features_dict = dict(
     (i, token) for token, i in target_features_dict.items())
 
-encoder_input_data = np.zeros(
-    (len(input_docs), max_encoder_seq_length, num_encoder_tokens),
-    dtype='float32')
-decoder_input_data = np.zeros(
-    (len(input_docs), max_decoder_seq_length, num_decoder_tokens),
-    dtype='float32')
-decoder_target_data = np.zeros(
-    (len(input_docs), max_decoder_seq_length, num_decoder_tokens),
-    dtype='float32')
+encoder_input_data = np.zeros((len(input_docs), max_encoder_seq_length), dtype="int32")
+decoder_input_data = np.zeros((len(input_docs), max_decoder_seq_length), dtype="int32")
+decoder_target_data = np.zeros((len(input_docs), max_decoder_seq_length), dtype="int32")
 
-for line, (input_doc, target_doc) in enumerate(zip(input_docs, target_docs)):
+for i, (input_doc, target_doc) in enumerate(zip(input_docs, target_docs)):
+    for t, token in enumerate(re.findall(r"[\w']+|[^\s\w]", input_doc)):
+        encoder_input_data[i, t] = input_features_dict[token]
+    for t, token in enumerate(target_doc.split()):
+        decoder_input_data[i, t] = target_features_dict[token]
+        if t > 0:
+            decoder_target_data[i, t - 1] = target_features_dict[token]
 
-  for timestep, token in enumerate(re.findall(r"[\w']+|[^\s\w]", input_doc)):
-    # Assign 1. for the current line, timestep, & word
-    # in encoder_input_data:
-    encoder_input_data[line, timestep, input_features_dict[token]] = 1.
 
-  for timestep, token in enumerate(target_doc.split()):
+# Print number of input and target tokens
+def print_tokens():
+  print("Num input tokens:", len(input_features_dict))
+  print("Num target tokens:", len(target_features_dict))
+  print("Num reverse input tokens:", len(reverse_input_features_dict))
+  print("Num reverse target tokens:", len(reverse_target_features_dict))
 
-    decoder_input_data[line, timestep, target_features_dict[token]] = 1.
-    if timestep > 0:
+  print("\nFirst 50 input tokens:", list(input_features_dict.keys())[:50])
+  print("\nFirst 50 target tokens:", list(target_features_dict.keys())[:50])
 
-      decoder_target_data[line, timestep - 1, target_features_dict[token]] = 1.
+  if len(input_features_dict) != num_encoder_tokens:
+    print("\nError: Num encoder tokens does not match the length of input_features_dict")
+  if len(target_features_dict) != num_decoder_tokens:
+    print("\nError: Num decoder tokens does not match the length of target_features_dict")
+  if len(reverse_input_features_dict) != num_encoder_tokens:
+    print("\nError: Num reverse input tokens does not match the length of reverse_input_features_dict")
+  if len(reverse_target_features_dict) != num_decoder_tokens:
+    print("\nError: Num reverse target tokens does not match the length of reverse_target_features_dict")
 
-# print out those value here:
-print(list(input_features_dict.keys())[:50], reverse_target_features_dict[50])
-print(len(input_tokens))
+if __name__ == "__main__":
+    print_tokens()

@@ -1,5 +1,13 @@
+from config import n_corpus_lines, vocab_size_bpe
 import numpy as np
 import re
+from transformers import PreTrainedTokenizerFast
+from keras.preprocessing.sequence import pad_sequences
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+from sklearn.model_selection import train_test_split
 
 if __name__ == "__main__":
   print('\nPreprocessing script running...\n')
@@ -15,41 +23,51 @@ with open(data_path, 'r', encoding='utf-8') as f:   # Open in read mode
 input_docs = []   # Initialise list for input docs (English)
 target_docs = []    # Initialise list for target docs (French)
 
-# Building empty vocabulary sets
-input_tokens = set()    # Initialise set for input tokens 
-target_tokens = set()   # Initialise set for target tokens
-
 # Adjust number of lines to preprocess
-for line in lines[:2000]:    # For each line in first N lines
+for line in lines[:n_corpus_lines]:    # For each line in first N lines
   # Input and target sentences are separated by tabs
   input_doc, target_doc = line.split('\t')[:2]    # Splits each line at tab, takes index 0 and 1 and returns as input_doc and target_doc
   
-  # Clean and tokenise text
-  input_doc = " ".join(re.findall(r"[\w']+|[^\s\w]", input_doc))   # Joins all tokens (word items or punctuation items) in input_doc with spaces. Apostrophe included in word items eg "don't".
-  target_doc = "START " + " ".join(re.findall(r"[\w]+|[^\s\w]", target_doc)) + " END"    # Joins all tokens (word items or punctuation items) in target_doc with spaces. Apostrophe not included in word items eg "n'est" becomes "n" "est"
+  # Define function that tokenises text and concatenates with spaces into input and target docs
+  def clean_and_add_tokens(text, is_input_doc=False):
+    if is_input_doc:
+      tokens = re.findall(r"[\w']+|[^\s\w]", text)
+    else:
+      tokens = re.findall(r"[\w]+|[^\s\w]", text)
+    return " ".join(tokens)
+
+  input_doc = clean_and_add_tokens(input_doc, is_input_doc=True)
+  target_doc = clean_and_add_tokens(target_doc, is_input_doc=False)
 
   # Appending each input sentence to docs lists
   input_docs.append(input_doc)    # Add input doc to input docs list
   target_docs.append(target_doc)    # Add target doc to target docs list
 
-  # Tokenise sentences and build vocab sets
-  for token in re.findall(r"[\w']+|[^\s\w]", input_doc):    # Find all word or punctuation items in input_doc, add as tokens in input_tokens
+# Split input and target docs into train_temp and test splits
+input_docs_train_temp, input_docs_test, target_docs_train_temp, target_docs_test = train_test_split(input_docs, target_docs, test_size=0.2, random_state=42)
 
-    if token not in input_tokens:
-      input_tokens.add(token)   # Add token to input_tokens if not already in set
-  
-  for token in re.findall(r"[\w]+|[^\s\w]", target_doc):   # Find all word or punctuation items in target_doc, add as tokens in target_tokens
-  
-    if token not in target_tokens:
-      target_tokens.add(token)    # Add token to target_tokens if not already in set
+# Split train_temp into train and val splits
+input_docs_train, input_docs_val, target_docs_train, target_docs_val = train_test_split(input_docs_train_temp, target_docs_train_temp, test_size=0.1, random_state=42)
 
-# Sort tokens
-input_tokens = sorted(list(input_tokens))
-target_tokens = sorted(list(target_tokens))
+# Combine cleaned input and target docs
+corpus = input_docs + target_docs
 
-# Create num_encoder_tokens and num_decoder_tokens on set lengths
-num_encoder_tokens = len(input_tokens)
-num_decoder_tokens = len(target_tokens)
+# Create a blank BPE tokenizer
+tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+tokenizer.pre_tokenizer = Whitespace()  # split on whitespace
+
+# Define trainer with special tokens
+trainer = BpeTrainer(
+    vocab_size=vocab_size_bpe,
+    min_frequency=2,
+    special_tokens=["[PAD]","[UNK]", "[CLS]", "[SEP]", "[MASK]", "<START>", "<END>"]
+)
+
+# Train the tokenizer
+tokenizer.train_from_iterator(corpus, trainer=trainer)
+
+# Wrap it for HF
+hf_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
 
 # Calculate max sequence lengths from input and target docs
 max_encoder_seq_length = max([len(re.findall(r"[\w']+|[^\s\w]", input_doc)) for input_doc in input_docs])
@@ -57,59 +75,71 @@ max_decoder_seq_length = max([len(re.findall(r"[\w]+|[^\s\w]", target_doc)) for 
 
 # Print max sequence lengths
 if __name__ == "__main__":
-  print(f'Max encoder seq length: {max_encoder_seq_length} \nMax decoder seq length: {max_decoder_seq_length} \n')
+  print(f'\nMax encoder seq length: {max_encoder_seq_length} \nMax decoder seq length: {max_decoder_seq_length} \n')
 
-# Create token-index dictionaries for input and target languages
-input_features_dict = dict(
-    [(token, i) for i, token in enumerate(input_tokens)])
-target_features_dict = dict(
-    [(token, i) for i, token in enumerate(target_tokens)])
+# Encode each sentence of input and target docs into BPE tokens
+# Encode ALL English sentences to IDs
+encoder_input_train = [hf_tokenizer.encode(sent, add_special_tokens=False) for sent in input_docs_train]
+encoder_input_test  = [hf_tokenizer.encode(sent, add_special_tokens=False) for sent in input_docs_test]
+encoder_input_val = [hf_tokenizer.encode(sent, add_special_tokens=False) for sent in input_docs_val]
 
-# Create reverse token-index dictionaries (index-token) for input and target languages
-reverse_input_features_dict = dict(
-    (i, token) for token, i in input_features_dict.items())
-reverse_target_features_dict = dict(
-    (i, token) for token, i in target_features_dict.items())
+# Create start and end IDs
+start_id = hf_tokenizer.convert_tokens_to_ids("<START>")
+end_id = hf_tokenizer.convert_tokens_to_ids("<END>")
+hf_tokenizer.pad_token = "[PAD]"
 
-# Create 2D array of zeros for encoder input, decoder input and decoder target data. Dimensions: (number of lines inputted above, max sequence length for input or target language)
-encoder_input_data = np.zeros((len(input_docs), max_encoder_seq_length), dtype="int32")   # Will include values for each token in each input sequence, 0s after
-decoder_input_data = np.zeros((len(input_docs), max_decoder_seq_length), dtype="int32")   # Will include "START " before each input sequence, 0s after
-decoder_target_data = np.zeros((len(input_docs), max_decoder_seq_length), dtype="int32")   # Will include 0s before each input sequence, " END" after
+# Encode ALL French sentences to IDs, then prepend/append START/END manually
+decoder_input_train = [[start_id] + hf_tokenizer.encode(sent, add_special_tokens=False) for sent in target_docs_train]
+decoder_input_test = [[start_id] + hf_tokenizer.encode(sent, add_special_tokens=False) for sent in target_docs_test]
+decoder_input_val = [[start_id] + hf_tokenizer.encode(sent, add_special_tokens=False) for sent in target_docs_val]
 
-# Populate 2D arrays with index, value pairs from language doc and features dict
-for i, (input_doc, target_doc) in enumerate(zip(input_docs, target_docs)):    # For each index within both the zipped list of input_docs and target_docs
-    
-    for t, token in enumerate(re.findall(r"[\w']+|[^\s\w]", input_doc)):    # For each subsequent (index, value) pair in the tokenised input_doc
-        encoder_input_data[i, t] = input_features_dict[token]   # For sentence i, at position t, store the token index of that word from input_features_dict
+decoder_target_train = [hf_tokenizer.encode(sent, add_special_tokens=False) + [end_id] for sent in target_docs_train]
+decoder_target_test = [hf_tokenizer.encode(sent, add_special_tokens=False) + [end_id] for sent in target_docs_test]
+decoder_target_val = [hf_tokenizer.encode(sent, add_special_tokens=False) + [end_id] for sent in target_docs_val]
 
-    for t, token in enumerate(re.findall(r"[\w]+|[^\s\w]", target_doc)):    # For each subsequent (index, value) pair in the tokenised target_doc
-        decoder_input_data[i, t] = target_features_dict[token]    # For sentence i, at position t, store the token index of that word from target_features_dict
-        if t > 0:
-            decoder_target_data[i, t - 1] = target_features_dict[token]   # Push decoder_target_value t value to the left by 1, so that it is ahead of decoder_input_value by one timestep
+# Pad all sequences to the same length
+encoder_input_train = pad_sequences(encoder_input_train, padding='post')
+encoder_input_test = pad_sequences(encoder_input_test, padding='post')
+encoder_input_val = pad_sequences(encoder_input_val, padding='post')
+
+decoder_input_train = pad_sequences(decoder_input_train, padding='post')
+decoder_input_test = pad_sequences(decoder_input_test, padding='post')
+decoder_input_val = pad_sequences(decoder_input_val, padding='post')
+
+decoder_target_train = pad_sequences(decoder_target_train, padding='post')
+decoder_target_test = pad_sequences(decoder_target_test, padding='post')
+decoder_target_val = pad_sequences(decoder_target_val, padding='post')
 
 # Print number of input and target tokens
 def print_tokens():
-  print("Num input tokens:", len(input_features_dict))  # Print total number input tokens
-  print("Num target tokens:", len(target_features_dict))    # Print total number target tokens
-  print("Num reverse input tokens:", len(reverse_input_features_dict))    # Print total number reverse input tokens
-  print("Num reverse target tokens:", len(reverse_target_features_dict))    # Print total number reverse target tokens
+  # Calculate total number of tokens in corpus
+  num_corpus_tokens = hf_tokenizer.vocab_size
 
-  print("\nFirst 50 input tokens:", list(input_features_dict.keys())[:50])    # Print first 50 input tokens
-  print("\nFirst 50 target tokens:", list(target_features_dict.keys())[:50])    # Print first 50 target tokens
+  def get_words(text, language='en'):
+    if language == 'en':
+        # keep contractions as one word
+        return re.findall(r"[\w']+", text)
+    else:
+        # split French contractions into separate words
+        return re.findall(r"[\w]+", text)
 
-  # The number of keys in each dictionary should match the number of tokens (input_features_dict, num_encoder_tokens), (target_features_dict, num_decoder_tokens), (reverse_input_features_dict, num_encoder_tokens), (reverse_target_features_dict, num_decoder_tokens)
-  if len(input_features_dict) != num_encoder_tokens:
-    print("\nError: Num encoder tokens does not match the length of input_features_dict")
-  if len(target_features_dict) != num_decoder_tokens:
-    print("\nError: Num decoder tokens does not match the length of target_features_dict")
-  if len(reverse_input_features_dict) != num_encoder_tokens:
-    print("\nError: Num reverse input tokens does not match the length of reverse_input_features_dict")
-  if len(reverse_target_features_dict) != num_decoder_tokens:
-    print("\nError: Num reverse target tokens does not match the length of reverse_target_features_dict")
+  # Input (English) vocab
+  input_vocab = set()
+  for sent in input_docs:
+    input_vocab.update(get_words(sent, 'en'))
+
+  # Target (French) vocab
+  target_vocab = set()
+  for sent in target_docs:
+    target_vocab.update(get_words(sent, 'fr'))
+
+  print(f'Corpus token size: {num_corpus_tokens}')
+  print(f"English word count: {len(input_vocab)}")
+  print(f"French word count: {len(target_vocab)}")
 
 # Call the function to print tokens if this script is run (not imported as a module)
 if __name__ == "__main__":
   print_tokens()
 
 if __name__ == "__main__":
-  print('Preprocessing script finished.\n')
+  print('\nPreprocessing script finished.\n')
